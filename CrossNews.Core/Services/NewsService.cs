@@ -8,6 +8,7 @@ using CrossNews.Core.Messages;
 using CrossNews.Core.Model.Api;
 using MvvmCross.Plugin.Messenger;
 using Newtonsoft.Json;
+using System.Threading.Tasks.Dataflow;
 
 namespace CrossNews.Core.Services
 {
@@ -34,7 +35,7 @@ namespace CrossNews.Core.Services
             return items;
         }
 
-        public IEnumerable<Item> EnqueueItems(List<int> ids)
+        public async Task<IEnumerable<Item>> EnqueueItems(List<int> ids)
         {
             var stopwatch = Stopwatch.StartNew();
 
@@ -42,19 +43,29 @@ namespace CrossNews.Core.Services
 
             var newItems = new List<Item>();
 
-            var tasks = misses.Select(id => _client.GetStringAsync($"item/{id}.json")
-                .ContinueWith(task =>
-                {
-                    if (task.Status != TaskStatus.RanToCompletion)
-                    {
-                        return;
-                    }
+            var buffer = new BufferBlock<int>();
+            var downloader = new ActionBlock<int>(async id =>
+            {
+                var action = await _client.GetStringAsync($"item/{id}.json");
+                // handle data here
+                var storyItem = JsonConvert.DeserializeObject<Item>(action);
+                newItems.Add(storyItem);
+                var msg = new NewsItemMessage(this, storyItem);
+                _messenger.Publish(msg);
+            },
+                new ExecutionDataflowBlockOptions { MaxDegreeOfParallelism = Environment.ProcessorCount });
+            // notify TPL Dataflow to send messages from buffer to loader
+            buffer.LinkTo(downloader, new DataflowLinkOptions { PropagateCompletion = true });
 
-                    var storyItem = JsonConvert.DeserializeObject<Item>(task.Result);
-                    newItems.Add(storyItem);
-                    var msg = new NewsItemMessage(this, storyItem);
-                    _messenger.Publish(msg);
-                }));
+            foreach (var itemId in misses)
+            {
+                await buffer.SendAsync(itemId);
+            }
+            // queue is done
+            buffer.Complete();
+
+            // now it's safe to wait for completion of the downloader
+            await downloader.Completion;
 
             var itemList = items.ToList();
             foreach (var item in itemList)
@@ -63,13 +74,11 @@ namespace CrossNews.Core.Services
                 _messenger.Publish(msg);
             }
 
-            Task.WhenAll(tasks).ContinueWith(x =>
-            {
-                _cache.AddItemsToCache(newItems);
-                stopwatch.Stop();
-                var ms = stopwatch.ElapsedMilliseconds;
-                Debug.WriteLine("Queue completed in {0} ms", ms);
-            });
+            _cache.AddItemsToCache(newItems);
+            stopwatch.Stop();
+            var ms = stopwatch.ElapsedMilliseconds;
+            Debug.WriteLine("Queue completed in {0} ms", ms);
+
 
             return itemList;
         }
