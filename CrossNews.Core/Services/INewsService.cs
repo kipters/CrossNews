@@ -7,7 +7,7 @@ namespace CrossNews.Core.Services
     public interface INewsService
     {
         Task<List<int>> GetStoryListAsync(StoryKind kind);
-        IEnumerable<Item> EnqueueItems(List<int> ids);
+        Task<IEnumerable<Item>> EnqueueItems(List<int> ids);
     }
 
     public enum StoryKind
